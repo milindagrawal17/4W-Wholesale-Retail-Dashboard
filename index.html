@@ -1609,12 +1609,12 @@ buildNav(); buildKPI(); render('summary');
 <script>
 /* ============ BOOTSTRAP: fetch live Google Sheets, build DECKS, then start the app ============ */
 const SHEET_URLS = {
-  retail: 'https://docs.google.com/spreadsheets/d/1LPC-NL9xL7d21zn3z9uvHND_hW-zUl3buIGjXxJMzec/export?format=csv',
-  wholesale: 'https://docs.google.com/spreadsheets/d/1JYC5PQJRtzaO9xMqYm2bpsiezKZSmpD1CPXjsS0P7Io/export?format=csv'
+  retail: 'https://docs.google.com/spreadsheets/d/1_D10vmWFvRAW_OufKwRW6AQCYV7YfGwVlPyijVkz3KE/export?format=csv',
+  wholesale: 'https://docs.google.com/spreadsheets/d/14NNr9XZiqikc_4NUKH2btz8aBK6YCOmQYEMOWoX2R-g/export?format=csv'
 };
 const SHEET_EDIT_URLS = {
-  retail: 'https://docs.google.com/spreadsheets/d/1LPC-NL9xL7d21zn3z9uvHND_hW-zUl3buIGjXxJMzec/edit',
-  wholesale: 'https://docs.google.com/spreadsheets/d/1JYC5PQJRtzaO9xMqYm2bpsiezKZSmpD1CPXjsS0P7Io/edit'
+  retail: 'https://docs.google.com/spreadsheets/d/1_D10vmWFvRAW_OufKwRW6AQCYV7YfGwVlPyijVkz3KE/edit',
+  wholesale: 'https://docs.google.com/spreadsheets/d/14NNr9XZiqikc_4NUKH2btz8aBK6YCOmQYEMOWoX2R-g/edit'
 };
 
 async function fetchSheetCSV(url){
