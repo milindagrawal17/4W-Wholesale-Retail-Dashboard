@@ -314,6 +314,33 @@ function parseCSV(text){
 
 const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DATE_RE=/^\d{4}-\d{2}-\d{2}$/;
+const MONTH3_RE=/^([A-Za-z]{3})-(\d{2})$/;
+// header cells arrive either as ISO ('2025-04-01') or short form ('Apr-25', two-digit year, 20xx
+// assumed) depending on the source sheet â normalise both to the canonical ISO the rest of the
+// pipeline (dLabel/monthsOfFY/etc) expects.
+function normDateHeader(h){
+  const s=(h||'').trim();
+  if(DATE_RE.test(s)) return s;
+  const m=MONTH3_RE.exec(s);
+  if(!m) return null;
+  const mi=MONTH_ABBR.findIndex(a=>a.toLowerCase()===m[1].toLowerCase());
+  if(mi<0) return null;
+  return `${2000+parseInt(m[2],10)}-${String(mi+1).padStart(2,'0')}-01`;
+}
+// some source sheets carry a totals/summary row above the real header row â detect the header by
+// finding the first row with several date-like columns rather than assuming row 0.
+function findHeaderRowIdx(rows){
+  for(let i=0;i<Math.min(rows.length,10);i++){
+    if(rows[i].filter(h=>normDateHeader(h)).length>=6) return i;
+  }
+  return 0;
+}
+// strips thousands separators ("1,184") that some sheets quote in the CSV export, which plain
+// parseFloat would otherwise silently truncate at the comma.
+function numVal(raw){
+  const v=parseFloat(String(raw==null?'':raw).replace(/,/g,''));
+  return isNaN(v)?0:v;
+}
 function dLabel(dstr){ const [y,m]=dstr.split('-').map(Number); return MONTH_ABBR[m-1]+"'"+String(y).slice(2); }
 function dParts(dstr){ const [y,m]=dstr.split('-').map(Number); return {y,m}; }
 function fyEndYearOf(dstr){ const {y,m}=dParts(dstr); return m>=4? y+1 : y; }
@@ -352,17 +379,18 @@ const BODY_SUBSEG_KEY = {Hatchback:'s9_hatch', Sedan:'s10_sedan', SUV:'s11_suv'}
 
 function parseSheets(retailCSV, wsCSV){
   const rRows = parseCSV(retailCSV), wRows = parseCSV(wsCSV);
-  const rHead = rRows[0], wHead = wRows[0];
-  const rDateCols = rHead.map((h,i)=>({h,i})).filter(x=>DATE_RE.test(x.h));
-  const wDateCols = wHead.map((h,i)=>({h,i})).filter(x=>DATE_RE.test(x.h));
+  const rHeadIdx = findHeaderRowIdx(rRows), wHeadIdx = findHeaderRowIdx(wRows);
+  const rHead = rRows[rHeadIdx], wHead = wRows[wHeadIdx];
+  const rDateCols = rHead.map((h,i)=>({h:normDateHeader(h),i})).filter(x=>x.h);
+  const wDateCols = wHead.map((h,i)=>({h:normDateHeader(h),i})).filter(x=>x.h);
 
-  const retail = rRows.slice(1).filter(r=>r[1]).map(r=>{
-    const m={}; rDateCols.forEach(c=>{ const v=parseFloat(r[c.i]); m[c.h]= isNaN(v)?0:v; });
+  const retail = rRows.slice(rHeadIdx+1).filter(r=>r[1]).map(r=>{
+    const m={}; rDateCols.forEach(c=>{ m[c.h]=numVal(r[c.i]); });
     const oemRaw=(r[1]||'').trim();
     return {fuel:(r[0]||'').trim(), oem: canonOem(OEM_MERGE[oemRaw]||oemRaw), segment:(r[2]||'').trim(), m};
   });
-  const ws = wRows.slice(1).filter(r=>r[1]).map(r=>{
-    const m={}; wDateCols.forEach(c=>{ const v=parseFloat(r[c.i]); m[c.h]= isNaN(v)?0:v; });
+  const ws = wRows.slice(wHeadIdx+1).filter(r=>r[1]).map(r=>{
+    const m={}; wDateCols.forEach(c=>{ m[c.h]=numVal(r[c.i]); });
     const oemRaw=(r[1]||'').trim();
     return {oem: canonOem(OEM_MERGE[oemRaw]||oemRaw), model:(r[2]||'').trim(), body:(r[3]||'').trim(), sub:(r[4]||'').trim(), m};
   });
