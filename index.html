@@ -314,24 +314,55 @@ function parseCSV(text){
 
 const MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DATE_RE=/^\d{4}-\d{2}-\d{2}$/;
-const MONTH3_RE=/^([A-Za-z]{3})-(\d{2})$/;
-// header cells arrive either as ISO ('2025-04-01') or short form ('Apr-25', two-digit year, 20xx
-// assumed) depending on the source sheet â normalise both to the canonical ISO the rest of the
-// pipeline (dLabel/monthsOfFY/etc) expects.
-function normDateHeader(h){
+const MONTH3_RE=/^([A-Za-z]{3})-(\d{2,4})$/;
+const SLASH_RE=/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+// header cells arrive in whatever format Google Sheets happens to export the date-typed column
+// headers in ('2025-04-01' ISO, 'Apr-25' text, '01/04/2025' slash-delimited — this has been
+// observed to change between exports of the *same* sheet, presumably as its cell format changes)
+// — normalise all of them to the canonical ISO the rest of the pipeline expects.
+function isDateLikeHeader(h){
+  const s=(h||'').trim();
+  return DATE_RE.test(s) || MONTH3_RE.test(s) || SLASH_RE.test(s);
+}
+// slash dates are always month-start (day is constant across the row), but whether that constant
+// sits in position 1 or 2 depends on the sheet's locale (DD/MM/YYYY vs MM/DD/YYYY) — detect it
+// from the row instead of assuming, since '01/01/2024' alone is ambiguous either way.
+function detectSlashDayFirst(headerRow){
+  const pairs=headerRow.map(h=>SLASH_RE.exec((h||'').trim())).filter(Boolean)
+    .map(m=>[parseInt(m[1],10),parseInt(m[2],10)]);
+  if(!pairs.length) return true;
+  const aConst=pairs.every(p=>p[0]===pairs[0][0]), bConst=pairs.every(p=>p[1]===pairs[0][1]);
+  if(bConst && !aConst) return false;   // position 2 constant (=day) -> position 1 is month -> MM/DD/YYYY
+  return true;                           // position 1 constant (=day), or ambiguous -> DD/MM/YYYY
+}
+function normDateHeader(h, slashDayFirst){
   const s=(h||'').trim();
   if(DATE_RE.test(s)) return s;
-  const m=MONTH3_RE.exec(s);
-  if(!m) return null;
-  const mi=MONTH_ABBR.findIndex(a=>a.toLowerCase()===m[1].toLowerCase());
-  if(mi<0) return null;
-  return `${2000+parseInt(m[2],10)}-${String(mi+1).padStart(2,'0')}-01`;
+  let m;
+  if((m=MONTH3_RE.exec(s))){
+    const mi=MONTH_ABBR.findIndex(a=>a.toLowerCase()===m[1].toLowerCase());
+    if(mi<0) return null;
+    const yy = m[2].length===2? 2000+parseInt(m[2],10) : parseInt(m[2],10);
+    return `${yy}-${String(mi+1).padStart(2,'0')}-01`;
+  }
+  if((m=SLASH_RE.exec(s))){
+    const a=parseInt(m[1],10), b=parseInt(m[2],10), y=parseInt(m[3],10);
+    const month = slashDayFirst===false? a : b;
+    if(month<1||month>12) return null;
+    return `${y}-${String(month).padStart(2,'0')}-01`;
+  }
+  // last-resort fallback for any other Date-parseable header format
+  const d=new Date(s);
+  if(!isNaN(d.getTime()) && d.getUTCFullYear()>=2010 && d.getUTCFullYear()<=2045){
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-01`;
+  }
+  return null;
 }
 // some source sheets carry a totals/summary row above the real header row â detect the header by
 // finding the first row with several date-like columns rather than assuming row 0.
 function findHeaderRowIdx(rows){
   for(let i=0;i<Math.min(rows.length,10);i++){
-    if(rows[i].filter(h=>normDateHeader(h)).length>=6) return i;
+    if(rows[i].filter(isDateLikeHeader).length>=6) return i;
   }
   return 0;
 }
@@ -381,8 +412,9 @@ function parseSheets(retailCSV, wsCSV){
   const rRows = parseCSV(retailCSV), wRows = parseCSV(wsCSV);
   const rHeadIdx = findHeaderRowIdx(rRows), wHeadIdx = findHeaderRowIdx(wRows);
   const rHead = rRows[rHeadIdx], wHead = wRows[wHeadIdx];
-  const rDateCols = rHead.map((h,i)=>({h:normDateHeader(h),i})).filter(x=>x.h);
-  const wDateCols = wHead.map((h,i)=>({h:normDateHeader(h),i})).filter(x=>x.h);
+  const rSlashDayFirst = detectSlashDayFirst(rHead), wSlashDayFirst = detectSlashDayFirst(wHead);
+  const rDateCols = rHead.map((h,i)=>({h:normDateHeader(h,rSlashDayFirst),i})).filter(x=>x.h);
+  const wDateCols = wHead.map((h,i)=>({h:normDateHeader(h,wSlashDayFirst),i})).filter(x=>x.h);
 
   const retail = rRows.slice(rHeadIdx+1).filter(r=>r[1]).map(r=>{
     const m={}; rDateCols.forEach(c=>{ m[c.h]=numVal(r[c.i]); });
