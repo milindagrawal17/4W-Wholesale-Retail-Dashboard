@@ -698,18 +698,20 @@ function buildDecks(retailCSV, wsCSV){
     };
 
     // ================= TOP6 / REST (retail & wholesale) =================
-    function oemBlock(rows, totalsAllMonths, curMonths, curMo, curPrevYearMo){
+    function oemBlock(rows, totalsAllMonths, curMonths, curMo, curPrevYearMo, fyDoneMonths, fyPrevMonths){
       const oems = P.distinctOems(rows);
       const withNow = oems.map(oem=>({
         oem, now: P.sumRows(rows, curMo, r=>r.oem===oem),
         prev: curPrevYearMo!=null? P.sumRows(rows, curPrevYearMo, r=>r.oem===oem) : null
       })).map(o=>({...o, yoy: o.prev!=null? P.gpv(o.now,o.prev):null,
-        series: curMonths.map(m=> m!=null? P.sumRows(rows, m, r=>r.oem===o.oem) : null)}));
+        series: curMonths.map(m=> m!=null? P.sumRows(rows, m, r=>r.oem===o.oem) : null),
+        fy_cur: fyDoneMonths.reduce((s,m)=> s + P.sumRows(rows, m, r=>r.oem===o.oem), 0),
+        fy_prev: fyPrevMonths.reduce((s,m)=> s + P.sumRows(rows, m, r=>r.oem===o.oem), 0)}));
       const sorted = [...withNow].sort((a,b)=>b.now-a.now);
       return {top6: sorted.slice(0,6), rest: sorted.slice(6)};
     }
-    const rtBlk = oemBlock(retail, rtTotalByMonth, trail13, mo, prevYearMo);
-    const wBlk = wMo ? oemBlock(ws, wsTotalByMonth, wTrail13, wMo, wPrevYearMo) : {top6:[], rest:[]};
+    const rtBlk = oemBlock(retail, rtTotalByMonth, trail13, mo, prevYearMo, fyMonthsDone, fyMonthsPrev);
+    const wBlk = wMo ? oemBlock(ws, wsTotalByMonth, wTrail13, wMo, wPrevYearMo, fyMonthsDone, fyMonthsPrev) : {top6:[], rest:[]};
     D.s6_rt_top6 = {top6: rtBlk.top6};
     D.s7_rt_rest = rtBlk.rest;
     D.s4_ws_top6 = {top6: wBlk.top6};
