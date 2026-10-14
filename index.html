@@ -465,11 +465,23 @@ function activeModelsGrouped(ws, mo, filterFn){
 }
 
 
+// fuel universe, data-driven: the five known fuels (fixed order) plus any NEW fuel type that
+// appears in the sheet with volume, so a future fuel is picked up automatically. 'Others' and
+// blanks stay excluded to preserve the established fuel-share denominators.
+function fuelList(rows){
+  const KNOWN=['Petrol','CNG','Diesel','Hybrid','EV'];
+  const EXCLUDE=new Set(['Others','']);
+  const vol={};
+  for(const r of rows){ const f=r.fuel; if(f==null) continue; let s=0; for(const k in r.m) s+=r.m[k]; vol[f]=(vol[f]||0)+s; }
+  const extras=Object.keys(vol).filter(f=>!KNOWN.includes(f)&&!EXCLUDE.has(f)&&vol[f]>0).sort((a,b)=>vol[b]-vol[a]);
+  return [...KNOWN, ...extras];
+}
+
 const P = {
   parseCSV, dLabel, dParts, fyEndYearOf, fyTag, monthsOfFY, posInFY,
   gpv: _gpv, ppv: _ppv, OEM_MERGE, FUELS, SHARE_SUBS, BODY_SUBSEG_KEY,
   parseSheets, sumRows, seriesOf, seriesOfMap, distinctOems, topN,
-  activeModelCount, activeModelsGrouped
+  activeModelCount, activeModelsGrouped, fuelList
 };
 
 
@@ -731,8 +743,9 @@ function buildDecks(retailCSV, wsCSV){
       const now = P.sumRows(retail, mo, r=>r.oem===oem && r.segment==='2. Luxury');
       const prev = P.sumRows(retail, prevYearMo, r=>r.oem===oem && r.segment==='2. Luxury');
       const series = trail13.map(m=>P.sumRows(retail, m, r=>r.oem===oem && r.segment==='2. Luxury'));
-      const fy_cur = rtWindowCur.reduce((s,m)=>s+P.sumRows(retail,m,r=>r.oem===oem&&r.segment==='2. Luxury'),0);
-      return {oem, now, prev, yoy: prev? P.gpv(now,prev):null, series, fy_cur};
+      const fy_cur  = fyMonthsDone.reduce((s,m)=>s+P.sumRows(retail,m,r=>r.oem===oem&&r.segment==='2. Luxury'),0);
+      const fy_prev = fyMonthsPrev.reduce((s,m)=>s+P.sumRows(retail,m,r=>r.oem===oem&&r.segment==='2. Luxury'),0);
+      return {oem, now, prev, yoy: prev? P.gpv(now,prev):null, series, fy_cur, fy_prev};
     }).sort((a,b)=>b.now-a.now);
     D.hl_lux = {labels: trailLabels, oems: luxList};
 
@@ -750,8 +763,11 @@ function buildDecks(retailCSV, wsCSV){
     bodies.forEach(b=> D.body_models[b] = wMo? P.activeModelsGrouped(ws, wMo, r=>r.body===b) : []);
 
     // ================= SUB-SEGMENTS (per body type) =================
-    ['Hatchback','Sedan','SUV'].forEach(b=>{
-      const key = P.BODY_SUBSEG_KEY[b];
+    const allBodies = [...new Set(ws.map(r=>r.body))].filter(b=>b);
+    const bodyNowTot = {}; allBodies.forEach(b=> bodyNowTot[b] = wMo? P.sumRows(ws,wMo,r=>r.body===b):0);
+    D.subseg_body_order = [...allBodies].sort((a,b)=> (bodyNowTot[b]-bodyNowTot[a]) || String(a).localeCompare(b));
+    D.subseg_blocks = {};
+    D.subseg_body_order.forEach(b=>{
       const subs = [...new Set(ws.filter(r=>r.body===b).map(r=>r.sub))];
       const series = {}; subs.forEach(s=> series[s] = wTrail13.map(m=> m!=null? P.sumRows(ws,m,r=>r.body===b&&r.sub===s):null));
       const rows = subs.map(s=>{
@@ -759,7 +775,7 @@ function buildDecks(retailCSV, wsCSV){
         const prev = wPrevYearMo? P.sumRows(ws,wPrevYearMo,r=>r.body===b&&r.sub===s):null;
         return {sub:s, now, yoy: prev!=null?P.gpv(now,prev):null};
       }).sort((a,b2)=>b2.now-a.now);
-      D[key] = {labels: wTrailLabels, series, rows};
+      D.subseg_blocks[b] = {labels: wTrailLabels, series, rows, body:b};
     });
     D.subseg_models = {};
     ws.forEach(r=>{});
@@ -767,8 +783,12 @@ function buildDecks(retailCSV, wsCSV){
       D.subseg_models[sub] = wMo? P.activeModelsGrouped(ws, wMo, r=>r.sub===sub) : [];
     });
 
-    // ================= SUB-SEGMENT SHARE (stacked) =================
-    Object.entries(P.SHARE_SUBS).forEach(([key, subName])=>{
+    // ================= SUB-SEGMENT SHARE (stacked) — ALL sub-segments, data-driven =================
+    const shareSubsAll = [...new Set(ws.map(r=>r.sub))].filter(s=>s);
+    const subNowTot = {}; shareSubsAll.forEach(s=> subNowTot[s] = wMo? P.sumRows(ws,wMo,r=>r.sub===s):0);
+    D.share_order = [...shareSubsAll].sort((a,b)=> (subNowTot[b]-subNowTot[a]) || String(a).localeCompare(b));
+    D.share_blocks = {};
+    D.share_order.forEach(subName=>{
       const oemsInSub = [...new Set(ws.filter(r=>r.sub===subName).map(r=>r.oem))];
       const totals = wTrail13.map(m=> m!=null? P.sumRows(ws,m,r=>r.sub===subName):0);
       const oemsRanked = P.topN(oemsInSub.map(oem=>({oem, now: wMo?P.sumRows(ws,wMo,r=>r.sub===subName&&r.oem===oem):0})),100,'now').map(x=>x.oem);
@@ -781,24 +801,25 @@ function buildDecks(retailCSV, wsCSV){
         });
       });
       const footnotes = wMo? P.activeModelsGrouped(ws, wMo, r=>r.sub===subName) : [];
-      D[key] = {labels: wTrailLabels, order: oemsRanked, share, footnotes};
+      D.share_blocks[subName] = {labels: wTrailLabels, order: oemsRanked, share, footnotes, sub:subName};
     });
 
     // ================= FUEL (retail) =================
-    const fuelTotals = {}; P.FUELS.forEach(f=> fuelTotals[f] = wMo!==undefined ? P.sumRows(retail, mo, r=>r.fuel===f) : 0);
-    const fuelMonthTotal = P.FUELS.reduce((s,f)=>s+fuelTotals[f],0);
-    const fuelPrevTotals = {}; P.FUELS.forEach(f=> fuelPrevTotals[f] = P.sumRows(retail, prevYearMo, r=>r.fuel===f));
-    const fuelPrevMonthTotal = P.FUELS.reduce((s,f)=>s+fuelPrevTotals[f],0);
-    const fuelTiles = P.FUELS.map(f=>({fuel:f, now: fuelTotals[f], yoy: P.gpv(fuelTotals[f], fuelPrevTotals[f])}));
-    const fuelSeries = {}; P.FUELS.forEach(f=> fuelSeries[f] = trail13.map(m=>P.sumRows(retail,m,r=>r.fuel===f)));
-    const fuelShareNow = {}; P.FUELS.forEach(f=> fuelShareNow[f] = fuelMonthTotal? Math.round(fuelTotals[f]/fuelMonthTotal*1000)/10:0);
-    const fuelSharePrev = {}; P.FUELS.forEach(f=> fuelSharePrev[f] = fuelPrevMonthTotal? Math.round(fuelPrevTotals[f]/fuelPrevMonthTotal*1000)/10:0);
+    const fuelsDyn = P.fuelList(retail);   // dynamic fuel universe (see fuelList)
+    const fuelTotals = {}; fuelsDyn.forEach(f=> fuelTotals[f] = wMo!==undefined ? P.sumRows(retail, mo, r=>r.fuel===f) : 0);
+    const fuelMonthTotal = fuelsDyn.reduce((s,f)=>s+fuelTotals[f],0);
+    const fuelPrevTotals = {}; fuelsDyn.forEach(f=> fuelPrevTotals[f] = P.sumRows(retail, prevYearMo, r=>r.fuel===f));
+    const fuelPrevMonthTotal = fuelsDyn.reduce((s,f)=>s+fuelPrevTotals[f],0);
+    const fuelTiles = fuelsDyn.map(f=>({fuel:f, now: fuelTotals[f], yoy: P.gpv(fuelTotals[f], fuelPrevTotals[f])}));
+    const fuelSeries = {}; fuelsDyn.forEach(f=> fuelSeries[f] = trail13.map(m=>P.sumRows(retail,m,r=>r.fuel===f)));
+    const fuelShareNow = {}; fuelsDyn.forEach(f=> fuelShareNow[f] = fuelMonthTotal? Math.round(fuelTotals[f]/fuelMonthTotal*1000)/10:0);
+    const fuelSharePrev = {}; fuelsDyn.forEach(f=> fuelSharePrev[f] = fuelPrevMonthTotal? Math.round(fuelPrevTotals[f]/fuelPrevMonthTotal*1000)/10:0);
     D.s19_fuel = {tiles: fuelTiles, labels: trailLabels, series: fuelSeries,
-      share: Object.fromEntries(P.FUELS.map(f=>[f,{now:fuelShareNow[f], prev:fuelSharePrev[f]}]))};
+      share: Object.fromEntries(fuelsDyn.map(f=>[f,{now:fuelShareNow[f], prev:fuelSharePrev[f]}]))};
 
     const fuelShareSeries = {};
-    P.FUELS.forEach(f=> fuelShareSeries[f] = trail13.map(m=>{
-      const tot = P.FUELS.reduce((s,ff)=>s+P.sumRows(retail,m,r=>r.fuel===ff),0);
+    fuelsDyn.forEach(f=> fuelShareSeries[f] = trail13.map(m=>{
+      const tot = fuelsDyn.reduce((s,ff)=>s+P.sumRows(retail,m,r=>r.fuel===ff),0);
       return tot? Math.round(P.sumRows(retail,m,r=>r.fuel===f)/tot*1000)/10 : 0;
     }));
     D.hl_fuel_share_trend = {labels: trailLabels, series: fuelShareSeries};
@@ -807,18 +828,18 @@ function buildDecks(retailCSV, wsCSV){
     const topOemsForMix = P.topN(oemsRetail.map(oem=>({oem, now:P.sumRows(retail,mo,r=>r.oem===oem)})),12,'now').map(x=>x.oem);
     const mixOems = topOemsForMix.map(oem=>{
       const vol = {}, vol_prev = {};
-      P.FUELS.forEach(f=>{ vol[f]=P.sumRows(retail,mo,r=>r.oem===oem&&r.fuel===f); vol_prev[f]=P.sumRows(retail,prevYearMo,r=>r.oem===oem&&r.fuel===f); });
-      const total = P.FUELS.reduce((s,f)=>s+vol[f],0), total_prev = P.FUELS.reduce((s,f)=>s+vol_prev[f],0);
+      fuelsDyn.forEach(f=>{ vol[f]=P.sumRows(retail,mo,r=>r.oem===oem&&r.fuel===f); vol_prev[f]=P.sumRows(retail,prevYearMo,r=>r.oem===oem&&r.fuel===f); });
+      const total = fuelsDyn.reduce((s,f)=>s+vol[f],0), total_prev = fuelsDyn.reduce((s,f)=>s+vol_prev[f],0);
       const totalPrevMonth = P.sumRows(retail, prevMonthMo, r=>r.oem===oem);
-      const share = {}; P.FUELS.forEach(f=> share[f] = total? Math.round(vol[f]/total*1000)/10:0);
+      const share = {}; fuelsDyn.forEach(f=> share[f] = total? Math.round(vol[f]/total*1000)/10:0);
       return {oem, total, total_prev, yoy: total_prev?P.gpv(total,total_prev):null,
         mom: (isAprilStart||!totalPrevMonth)?null:P.gpv(total,totalPrevMonth), vol, vol_prev, share};
     });
-    D.hl_oem_fuelmix = {prev_label: M.prev_label, now_label: label, fuels: P.FUELS, oems: mixOems};
+    D.hl_oem_fuelmix = {prev_label: M.prev_label, now_label: label, fuels: fuelsDyn, oems: mixOems};
 
     // ================= FUEL -> OEM SHARE =================
     const fuelOemData = {};
-    P.FUELS.forEach(f=>{
+    fuelsDyn.forEach(f=>{
       const oemsInFuel = P.topN(oemsRetail.map(oem=>({oem, now:P.sumRows(retail,mo,r=>r.oem===oem&&r.fuel===f)})).filter(x=>x.now>0),8,'now').map(x=>x.oem);
       const totals = trail13.map(m=>P.sumRows(retail,m,r=>r.fuel===f));
       const share = {}; oemsInFuel.forEach(oem=>{
@@ -837,7 +858,7 @@ function buildDecks(retailCSV, wsCSV){
       });
       fuelOemData[f] = {labels: trailLabels, order: oemsInFuel, share, others, table, tot_now, tot_prev};
     });
-    D.fuel_oem = {fuels: P.FUELS, prev_label: M.prev_label, now_label: label, data: fuelOemData};
+    D.fuel_oem = {fuels: fuelsDyn, prev_label: M.prev_label, now_label: label, data: fuelOemData};
 
     months[label] = D;
     order.push(label);
@@ -905,6 +926,7 @@ const gpv = (nv, ov) => { const a=Math.round(nv), b=Math.round(ov); return !b ? 
 const ppv = (np, op) => Math.round((Math.round(np*10)/10 - Math.round(op*10)/10)*10)/10;
 const lastNonNull = a => {for(let i=a.length-1;i>=0;i--) if(a[i]!=null) return a[i]; return null;};
 const upFirst = s => s && s[0]>='a'&&s[0]<='z' ? s[0].toUpperCase()+s.slice(1) : s;
+const escA = s => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 
 /* ---------- chart builders ---------- */
 const charts = {};
@@ -1311,19 +1333,20 @@ function bodyInsights(b){
 }
 
 /* ---- Sub-segments ---- */
-let subTab='s9_hatch';
-const SUBS={s9_hatch:['Hatchback','s9c'],s10_sedan:['Sedan','s10c'],s11_suv:['SUV','s11c']};
+let subTab=null;
 V.subseg = ()=>{
-  const meta=SUBS[subTab], blk=D[subTab];
-  const tabs=Object.entries(SUBS).map(([k,v])=>`<button class="${k===subTab?'on':''}" onclick="subTab='${k}';render('subseg')">${v[0]}</button>`).join('');
+  const order=D.subseg_body_order||[];
+  if(!subTab || !D.subseg_blocks[subTab]) subTab=order[0];
+  const blk=D.subseg_blocks[subTab], name=subTab;
+  const tabs=order.map(b=>`<button class="${b===subTab?'on':''}" data-k="${escA(b)}" onclick="subTab=this.dataset.k;render('subseg')">${b}</button>`).join('');
   const rows=blk.rows.map(r=>`<div class="tile"><div class="nm">${r.sub}</div>
     <div class="v">${inr(r.now)}</div><div class="d ${cls(r.yoy)}">${sign(r.yoy)} YoY</div></div>`).join('');
-  return head('Segments',meta[0]+' Sub-segments \u2014 Wholesale','SIAM wholesale · trailing 13 months · figures in \u2019000')
-  + `<div class="seg" style="margin-bottom:16px">${tabs}</div>`
+  return head('Segments',name+' Sub-segments \u2014 Wholesale','SIAM wholesale · trailing 13 months · figures in \u2019000')
+  + `<div class="scrollx"><div class="seg" style="margin-bottom:16px">${tabs}</div></div>`
   + `<div class="tiles">${rows}</div>`
   + `<div class="grid">
-      ${panel(meta[0]+' sub-segments, trailing 13M','s_subc',`<div class="chartbox tall"><canvas id="s_subc"></canvas></div>`)}
-      ${tkBox('Key Takeaways', subInsights(blk,meta[0]))}
+      ${panel(name+' sub-segments, trailing 13M','s_subc',`<div class="chartbox tall"><canvas id="s_subc"></canvas></div>`)}
+      ${tkBox('Key Takeaways', subInsights(blk,name))}
     </div>`
   + modelFootCard(Object.keys(blk.series).filter(k=>D.subseg_models[k]).map(k=>({label:k,foots:D.subseg_models[k]})));
 };
@@ -1335,31 +1358,33 @@ function modelFootCard(groups){
   return `<div class="card" style="margin-top:20px"><h3>Models considered (${M.report_label})</h3><div class="foot">${body}</div></div>`;
 }
 V.subseg.draw = ()=>{
-  const blk=D[subTab];
+  const blk=D.subseg_blocks[subTab];
   lineMulti('s_subc', blk.labels, Object.keys(blk.series).map(k=>({label:k,data:blk.series[k],color:colorFor(k),w:2.4})),
     {labels:true});
 };
 function subInsights(blk,name){
   const r=[...blk.rows].sort((a,b)=>b.now-a.now);
-  const fast=topMover(blk.rows)[0], slow=topMover(blk.rows).slice(-1)[0];
-  return [
+  if(!r.length) return [`No ${name} wholesale data yet.`];
+  const mv=topMover(blk.rows), fast=mv[0], slow=mv[mv.length-1];
+  const out=[
     `Largest ${name} sub-segment: <b>${r[0].sub}</b> at <b>${inr(r[0].now)}</b> units (${sign(r[0].yoy)} YoY).`,
-    `Smallest: <b>${r[r.length-1].sub}</b> at <b>${inr(r[r.length-1].now)}</b> units.`,
-    `Fastest growth: <b>${fast.sub}</b>, <span class="em">${sign(fast.yoy)}</span> YoY.`,
-    slow.yoy<0? `Contracting: <b>${slow.sub}</b> at <span class="em">${sign(slow.yoy)}</span> YoY.`
-      : `Weakest growth: <b>${slow.sub}</b> at <span class="em">${sign(slow.yoy)}</span> YoY.`,
-    `Sub-segment shares are computed within ${name} only.`
+    `Smallest: <b>${r[r.length-1].sub}</b> at <b>${inr(r[r.length-1].now)}</b> units.`
   ];
+  if(fast) out.push(`Fastest growth: <b>${fast.sub}</b>, <span class="em">${sign(fast.yoy)}</span> YoY.`);
+  if(slow && slow!==fast) out.push(slow.yoy<0? `Contracting: <b>${slow.sub}</b> at <span class="em">${sign(slow.yoy)}</span> YoY.`
+      : `Weakest growth: <b>${slow.sub}</b> at <span class="em">${sign(slow.yoy)}</span> YoY.`);
+  out.push(`Sub-segment shares are computed within ${name} only.`);
+  return out;
 }
 
 /* ---- Segment share (stacked) ---- */
-let shareTab='s16_compsuv';
-const SHARES={s12_minihatch:'Mini Hatch',s13_premhatch:'Premium Hatch',s14_compsedan:'Compact Sedan',
-  s15_midsedan:'Mid-size Sedan',s16_compsuv:'Compact SUV',s17_midsuv:'Mid-size SUV',s18_execsuv:'Executive SUV'};
+let shareTab=null;
 V.share = ()=>{
-  const blk=D[shareTab], nm=SHARES[shareTab];
-  const tabs=Object.entries(SHARES).map(([k,v])=>`<button class="${k===shareTab?'on':''}" onclick="shareTab='${k}';render('share')">${v}</button>`).join('');
-  const foot=blk.footnotes.map(f=>`<b>${f.oem}</b>: ${f.models.join(', ')}`).join(' &nbsp;·&nbsp; ');
+  const order=D.share_order||[];
+  if(!shareTab || !D.share_blocks[shareTab]) shareTab=order[0];
+  const blk=D.share_blocks[shareTab], nm=shareTab;
+  const tabs=order.map(s=>`<button class="${s===shareTab?'on':''}" data-k="${escA(s)}" onclick="shareTab=this.dataset.k;render('share')">${s}</button>`).join('');
+  const foot=blk.footnotes.map(f=>`<b>${f.oem}</b>: ${f.models.map(upFirst).join(', ')}`).join(' &nbsp;·&nbsp; ');
   return head('Segments',nm+' \u2014 Market Share','SIAM wholesale · within-segment share % · trailing 13 months')
   + `<div class="scrollx"><div class="seg" style="margin-bottom:16px">${tabs}</div></div>`
   + `<div class="grid">
@@ -1369,12 +1394,13 @@ V.share = ()=>{
   + `<div class="card" style="margin-top:20px"><h3>Active models (${M.report_label})</h3><div class="foot">${foot}</div></div>`;
 };
 V.share.draw = ()=>{
-  const blk=D[shareTab];
+  const blk=D.share_blocks[shareTab];
   stackedShare('sharec', blk.labels, blk.order, blk.share);
 };
 function shareInsights(blk,nm){
   const rep=blk.order.map(o=>({oem:o,now:blk.share[o][blk.share[o].length-1],first:blk.share[o][0]}))
     .sort((a,b)=>b.now-a.now);
+  if(!rep.length) return [`No wholesale data for ${nm} yet.`];
   const lead=rep[0], delta=Math.round((lead.now-lead.first)*10)/10;
   const swing=[...rep].map(r=>({oem:r.oem,chg:Math.round((r.now-r.first)*10)/10}))
     .sort((a,b)=>b.chg-a.chg);
